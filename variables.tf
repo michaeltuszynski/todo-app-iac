@@ -1,15 +1,15 @@
 variable "app_name" {
-    type = string
-    default = "todo"
+  type    = string
+  default = "todo"
 }
 
 variable "app_environment" {
-    type = string
-    default = "test"
+  type    = string
+  default = "production"
 }
 
 variable "region" {
-    type = string
-    default = "us-west-2"
+  type    = string
+  default = "us-west-2"
 }
 

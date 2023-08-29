@@ -10,6 +10,15 @@ data "aws_ecr_repository" "ts_database_repo" {
   name = "mongo"
 }
 
+resource "aws_cloudwatch_log_group" "ecs-tasks" {
+  name = "${var.app_name}-${var.app_environment}-ecs-tasks-logs"
+
+  tags = {
+    Application = var.app_name
+    Environment = var.app_environment
+  }
+}
+
 data "aws_availability_zones" "available_zones" {
   state = "available"
 }
@@ -108,6 +117,21 @@ resource "aws_lb_target_group" "todo_app_target_group" {
   protocol    = "HTTP"
   vpc_id      = aws_vpc.todo_vpc.id
   target_type = "ip"
+
+  health_check {
+    healthy_threshold   = "3"
+    interval            = "300"
+    protocol            = "HTTP"
+    matcher             = "200"
+    timeout             = "3"
+    path                = "/health"
+    unhealthy_threshold = "2"
+  }
+
+  tags = {
+    Name        = "${var.app_name}-lb-tg"
+    Environment = var.app_environment
+  }
 }
 
 resource "aws_lb_listener" "todo_app_alb_listener" {
@@ -129,8 +153,24 @@ data "aws_ssm_parameter" "db_password" {
   name = "/database/password"
 }
 
-resource "aws_iam_role" "ecs_task_execution_role" {
-  name = "ecs_task_execution_role"
+resource "aws_iam_role" "ecs_task_role" {
+  name = "ecs_task_role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = "sts:AssumeRole",
+        Effect = "Allow",
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "ecs_execution_role" {
+  name = "ecs_execution_role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
@@ -146,8 +186,8 @@ resource "aws_iam_role" "ecs_task_execution_role" {
 }
 
 resource "aws_iam_policy" "custom_ecs_permissions" {
-  name        = "MyECSTaskCustomPermissions"
-  description = "My custom permissions for ECS tasks"
+  name        = "ECSTaskCustomPermissions"
+  description = "Custom permissions for ECS tasks"
 
   policy = jsonencode({
     Version = "2012-10-17",
@@ -163,8 +203,8 @@ resource "aws_iam_policy" "custom_ecs_permissions" {
 }
 
 resource "aws_iam_policy" "custom_ecr_permissions" {
-  name        = "MyECRTaskCustomPermissions"
-  description = "My custom permissions for ECR tasks"
+  name        = "ECRTaskCustomPermissions"
+  description = "Custom permissions for ECR tasks"
 
   policy = jsonencode({
     Version = "2012-10-17",
@@ -188,14 +228,140 @@ resource "aws_iam_policy" "custom_ecr_permissions" {
   })
 }
 
+resource "aws_iam_policy" "custom_cloudwatch_permissions" {
+  name        = "CloudWatchCustomPermissions"
+  description = "Custom permissions for Cloudwatch"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ],
+        Effect   = "Allow",
+        Resource = ["arn:aws:logs:*:*:*"],
+        Sid      = "AllowCloudWatchLogs"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "custom_service_disovery_permissions" {
+  name        = "ServiceDiscoveryCustomPermissions"
+  description = "Custom permissions for Service Discovery"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "servicediscovery:DiscoverInstances",
+          "servicediscovery:GetInstancesHealthStatus",
+          "servicediscovery:GetOperation",
+          "servicediscovery:GetService",
+          "servicediscovery:ListInstances",
+          "servicediscovery:ListNamespaces",
+          "servicediscovery:ListOperations",
+          "servicediscovery:ListServices",
+          "servicediscovery:RegisterInstance",
+          "servicediscovery:DeregisterInstance"
+        ],
+        Effect   = "Allow",
+        Resource = ["*"],
+        Sid      = "AllowServiceDiscovery"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "custom_route53_permissions" {
+  name        = "ServiceDiscoveryCustomPermissions"
+  description = "Custom permissions for Service Discovery"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "route53:CreateHealthCheck",
+          "route53:GetHealthCheck",
+          "route53:UpdateHealthCheck",
+          "route53:DeleteHealthCheck",
+          "route53:ChangeResourceRecordSets",
+          "route53:GetChange",
+          "route53:CreateHostedZone",
+          "route53:DeleteHostedZone",
+          "route53:GetHostedZone",
+          "route53:ListHostedZones",
+          "route53:ListResourceRecordSets"
+        ],
+        Effect   = "Allow",
+        Resource = ["*"],
+        Sid      = "AllowRoute53"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "custom_service_discovery_policy_attachment" {
+  role       = aws_iam_role.ecs_task_role.name
+  policy_arn = aws_iam_policy.custom_service_disovery_permissions.arn
+}
+
+resource "aws_iam_role_policy_attachment" "custom_route53_policy_attachment" {
+  role       = aws_iam_role.ecs_execution_role.name
+  policy_arn = aws_iam_policy.custom_route53_permissions.arn
+}
+
 resource "aws_iam_role_policy_attachment" "custom_ecs_policy_attachment" {
-  role       = aws_iam_role.ecs_task_execution_role.name
+  role       = aws_iam_role.ecs_task_role.name
   policy_arn = aws_iam_policy.custom_ecs_permissions.arn
 }
 
 resource "aws_iam_role_policy_attachment" "custom_ecr_policy_attachment" {
-  role       = aws_iam_role.ecs_task_execution_role.name
+  role       = aws_iam_role.ecs_execution_role.name
   policy_arn = aws_iam_policy.custom_ecr_permissions.arn
+}
+
+resource "aws_iam_role_policy_attachment" "cloudwatch_policy_attachment" {
+  role       = aws_iam_role.ecs_execution_role.name
+  policy_arn = aws_iam_policy.custom_cloudwatch_permissions.arn
+}
+
+#private dns namespace for service discovery
+resource "aws_service_discovery_private_dns_namespace" "namespace" {
+  name = "local"
+  vpc  = aws_vpc.todo_vpc.id
+}
+
+#service discovery for backend
+resource "aws_service_discovery_service" "todo_backend_service" {
+  name = "${var.app_name}-backend-service"
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.namespace.id
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+    routing_policy = "MULTIVALUE"
+  }
+}
+
+#service discovery for database
+resource "aws_service_discovery_service" "todo_database_service" {
+  name = "${var.app_name}-database-service"
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.namespace.id
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+    routing_policy = "MULTIVALUE"
+  }
 }
 
 # ECS Security Group for Tasks
@@ -260,8 +426,8 @@ resource "aws_security_group" "ecs_cluster" {
 }
 
 # ECS Cluster
-resource "aws_ecs_cluster" "my_cluster" {
-  name = "my-cluster"
+resource "aws_ecs_cluster" "todo_app_cluster" {
+  name = "${var.app_name}-cluster"
 }
 
 # Backend Task Definition
@@ -271,15 +437,37 @@ resource "aws_ecs_task_definition" "backend" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+  execution_role_arn       = aws_iam_role.ecs_execution_role.arn
+  task_role_arn            = aws_iam_role.ecs_task_role.arn
 
   container_definitions = jsonencode([
     {
-      name  = "backend"
-      image = "${data.aws_ecr_repository.ts_backend_repo.repository_url}:latest"
+      name      = "backend"
+      image     = "${data.aws_ecr_repository.ts_backend_repo.repository_url}:latest"
+      essential = true
       portMappings = [{
         containerPort = 5000
       }]
+
+      environment = [
+        {
+          name  = "MONGODB_URI",
+          value = "mongodb://${data.aws_ssm_parameter.db_username.value}:${data.aws_ssm_parameter.db_password.value}@${aws_service_discovery_service.todo_database_service.name}.${aws_service_discovery_private_dns_namespace.namespace.name}:27017/?authSource=admin&readPreference=primary&ssl=false&directConnection=true"
+        },
+        {
+          name  = "NODEPORT",
+          value = "5000"
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.ecs-tasks.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "ts-backend"
+        }
+      }
     }
   ])
 }
@@ -291,7 +479,8 @@ resource "aws_ecs_task_definition" "database" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+  execution_role_arn       = aws_iam_role.ecs_execution_role.arn
+  task_role_arn            = aws_iam_role.ecs_task_role.arn
 
   container_definitions = jsonencode([
     {
@@ -311,6 +500,15 @@ resource "aws_ecs_task_definition" "database" {
           value = "${data.aws_ssm_parameter.db_password.value}"
         }
       ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.ecs-tasks.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "ts-database"
+        }
+      }
     }
   ])
 }
@@ -318,7 +516,7 @@ resource "aws_ecs_task_definition" "database" {
 # Backend ECS Service
 resource "aws_ecs_service" "backend" {
   name            = "backend-service"
-  cluster         = aws_ecs_cluster.my_cluster.id
+  cluster         = aws_ecs_cluster.todo_app_cluster.id
   task_definition = aws_ecs_task_definition.backend.arn
   launch_type     = "FARGATE"
   desired_count   = 1
@@ -335,14 +533,17 @@ resource "aws_ecs_service" "backend" {
     container_port   = 5000
   }
 
-  depends_on = [aws_lb.todo_app_lb]
+  service_registries {
+    registry_arn = aws_service_discovery_service.todo_backend_service.arn
+  }
 
+  depends_on = [aws_lb.todo_app_lb, aws_ecs_service.database]
 }
 
 # Database ECS Service
 resource "aws_ecs_service" "database" {
   name            = "database-service"
-  cluster         = aws_ecs_cluster.my_cluster.id
+  cluster         = aws_ecs_cluster.todo_app_cluster.id
   task_definition = aws_ecs_task_definition.database.arn
   launch_type     = "FARGATE"
   desired_count   = 1
@@ -351,4 +552,9 @@ resource "aws_ecs_service" "database" {
     subnets         = aws_subnet.private.*.id
     security_groups = [aws_security_group.ecs_tasks.id]
   }
+
+  service_registries {
+    registry_arn = aws_service_discovery_service.todo_database_service.arn
+  }
+
 }
