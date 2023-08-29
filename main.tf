@@ -10,7 +10,6 @@ data "aws_ecr_repository" "ts_database_repo" {
   name = "mongo"
 }
 
-
 data "aws_availability_zones" "available_zones" {
   state = "available"
 }
@@ -131,7 +130,7 @@ data "aws_ssm_parameter" "db_password" {
 }
 
 resource "aws_iam_role" "ecs_task_execution_role" {
-  name = "ecs_execution_role"
+  name = "ecs_task_execution_role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
@@ -163,9 +162,40 @@ resource "aws_iam_policy" "custom_ecs_permissions" {
   })
 }
 
+resource "aws_iam_policy" "custom_ecr_permissions" {
+  name        = "MyECRTaskCustomPermissions"
+  description = "My custom permissions for ECR tasks"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:PutImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload"
+        ],
+        Effect   = "Allow",
+        Resource = ["*"],
+        Sid      = "AllowPushPull"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy_attachment" "custom_ecs_policy_attachment" {
   role       = aws_iam_role.ecs_task_execution_role.name
   policy_arn = aws_iam_policy.custom_ecs_permissions.arn
+}
+
+resource "aws_iam_role_policy_attachment" "custom_ecr_policy_attachment" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = aws_iam_policy.custom_ecr_permissions.arn
 }
 
 # ECS Security Group for Tasks
