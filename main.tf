@@ -279,8 +279,8 @@ resource "aws_iam_policy" "custom_service_disovery_permissions" {
 }
 
 resource "aws_iam_policy" "custom_route53_permissions" {
-  name        = "ServiceDiscoveryCustomPermissions"
-  description = "Custom permissions for Service Discovery"
+  name        = "Route53CustomPermissions"
+  description = "Custom permissions for Route53"
 
   policy = jsonencode({
     Version = "2012-10-17",
@@ -374,6 +374,13 @@ resource "aws_security_group" "ecs_tasks" {
   ingress {
     from_port   = 5000 # for HTTP
     to_port     = 5000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 27017 # for HTTP
+    to_port     = 27017
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
