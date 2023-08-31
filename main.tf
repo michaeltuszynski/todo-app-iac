@@ -1,3 +1,5 @@
+
+## ECR Repositories
 data "aws_ecr_repository" "ts_backend_repo" {
   name = "ts_backend_app"
 }
@@ -10,6 +12,7 @@ data "aws_ecr_repository" "ts_database_repo" {
   name = "mongo"
 }
 
+## Cloudwatch Log Group
 resource "aws_cloudwatch_log_group" "ecs-tasks" {
   name = "${var.app_name}-${var.app_environment}-ecs-tasks-logs"
 
@@ -19,6 +22,7 @@ resource "aws_cloudwatch_log_group" "ecs-tasks" {
   }
 }
 
+## Network Configuration
 data "aws_availability_zones" "available_zones" {
   state = "available"
 }
@@ -58,16 +62,14 @@ resource "aws_route" "internet_access" {
   gateway_id             = aws_internet_gateway.gateway.id
 }
 
-resource "aws_eip" "gateway" {
-  count      = 2
+resource "aws_eip" "nat" {
   vpc        = true
   depends_on = [aws_internet_gateway.gateway]
 }
 
-resource "aws_nat_gateway" "gateway" {
-  count         = 2
-  subnet_id     = element(aws_subnet.public.*.id, count.index)
-  allocation_id = element(aws_eip.gateway.*.id, count.index)
+resource "aws_nat_gateway" "nat_gateway" {
+  subnet_id     = aws_subnet.public[0].id
+  allocation_id = aws_eip.nat.id
 }
 
 resource "aws_route_table" "private" {
@@ -76,7 +78,7 @@ resource "aws_route_table" "private" {
 
   route {
     cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = element(aws_nat_gateway.gateway.*.id, count.index)
+    nat_gateway_id = aws_nat_gateway.nat_gateway.id
   }
 }
 
@@ -86,6 +88,7 @@ resource "aws_route_table_association" "private" {
   route_table_id = element(aws_route_table.private.*.id, count.index)
 }
 
+## ALB Configuration
 resource "aws_security_group" "lb" {
   name   = "todo-alb-security-group"
   vpc_id = aws_vpc.todo_vpc.id
@@ -111,8 +114,8 @@ resource "aws_lb" "todo_app_lb" {
   security_groups = [aws_security_group.lb.id]
 }
 
-resource "aws_lb_target_group" "todo_app_target_group" {
-  name        = "todo-target-group"
+resource "aws_lb_target_group" "todo_app_frontend_target_group" {
+  name        = "${var.app_name}-frontend-target-group"
   port        = 80
   protocol    = "HTTP"
   vpc_id      = aws_vpc.todo_vpc.id
@@ -121,6 +124,29 @@ resource "aws_lb_target_group" "todo_app_target_group" {
   health_check {
     healthy_threshold   = "3"
     interval            = "300"
+    protocol            = "HTTP"
+    matcher             = "200"
+    timeout             = "3"
+    path                = "/health.html"
+    unhealthy_threshold = "2"
+  }
+
+  tags = {
+    Name        = "${var.app_name}-lb-tg"
+    Environment = var.app_environment
+  }
+}
+
+resource "aws_lb_target_group" "todo_app_backend_target_group" {
+  name        = "${var.app_name}-backend-target-group"
+  port        = 5000
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.todo_vpc.id
+  target_type = "ip"
+
+  health_check {
+    healthy_threshold   = "3"
+    interval            = "60"
     protocol            = "HTTP"
     matcher             = "200"
     timeout             = "3"
@@ -134,17 +160,54 @@ resource "aws_lb_target_group" "todo_app_target_group" {
   }
 }
 
-resource "aws_lb_listener" "todo_app_alb_listener" {
+resource "aws_lb_listener" "todo_app_frontend_alb_listener" {
   load_balancer_arn = aws_lb.todo_app_lb.id
   port              = "80"
   protocol          = "HTTP"
 
   default_action {
-    target_group_arn = aws_lb_target_group.todo_app_target_group.id
-    type             = "forward"
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "404: Not Found"
+      status_code  = "404"
+    }
   }
 }
 
+resource "aws_lb_listener_rule" "front_end_rule" {
+  listener_arn = aws_lb_listener.todo_app_frontend_alb_listener.arn
+  priority     = 100
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.todo_app_frontend_target_group.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/*"]
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "back_end_rule" {
+  listener_arn = aws_lb_listener.todo_app_frontend_alb_listener.arn
+  priority     = 200
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.todo_app_backend_target_group.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/health"]
+    }
+  }
+}
+
+## Database Params - move to Secrets Manager
 data "aws_ssm_parameter" "db_username" {
   name = "/database/username"
 }
@@ -153,6 +216,16 @@ data "aws_ssm_parameter" "db_password" {
   name = "/database/password"
 }
 
+## Create an S3 Bucket
+resource "random_pet" "bucket_name" {
+  length = 2
+}
+
+resource "aws_s3_bucket" "todo_app_bucket" {
+  bucket = "${var.app_name}-bucket-${random_pet.bucket_name.id}"
+}
+
+## IAM Roles and Policies
 resource "aws_iam_role" "ecs_task_role" {
   name = "ecs_task_role"
   assume_role_policy = jsonencode({
@@ -185,7 +258,25 @@ resource "aws_iam_role" "ecs_execution_role" {
   })
 }
 
-resource "aws_iam_policy" "custom_ecs_permissions" {
+resource "aws_iam_role" "s3_role" {
+  name = "S3FullAccessRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = "sts:AssumeRole",
+        Principal = {
+          Service = "ecs.amazonaws.com"
+        },
+        Effect = "Allow",
+        Sid    = ""
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "custom_ssm_permissions" {
   name        = "ECSTaskCustomPermissions"
   description = "Custom permissions for ECS tasks"
 
@@ -197,6 +288,28 @@ resource "aws_iam_policy" "custom_ecs_permissions" {
         Effect = "Allow",
         Resource = ["arn:aws:ssm:region:account-id:parameter/database/username",
         "arn:aws:ssm:region:account-id:parameter/database/password"]
+      }
+    ]
+  })
+}
+
+##temp for debug
+resource "aws_iam_policy" "custom_ecsexec_permissions" {
+  name        = "ECSExecTaskCustomPermissions"
+  description = "Custom permissions for ECS tasks"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action   = ["ecs:ExecuteCommand"],
+        Effect   = "Allow",
+        Resource = ["*"],
+        Condition = {
+          StringEquals = {
+            "ecs:TaskDefinitionExternalId" : "mptsf_debug"
+          }
+        }
       }
     ]
   })
@@ -218,7 +331,7 @@ resource "aws_iam_policy" "custom_ecr_permissions" {
           "ecr:PutImage",
           "ecr:InitiateLayerUpload",
           "ecr:UploadLayerPart",
-          "ecr:CompleteLayerUpload"
+          "ecr:CompleteLayerUpload",
         ],
         Effect   = "Allow",
         Resource = ["*"],
@@ -307,19 +420,54 @@ resource "aws_iam_policy" "custom_route53_permissions" {
   })
 }
 
+resource "aws_iam_policy" "s3_policy_permissions" {
+  name        = "S3FullAccessPolicy"
+  description = "Policy that allows full access to a specific S3 bucket"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ],
+        Effect = "Allow",
+        Resource = [
+          aws_s3_bucket.todo_app_bucket.arn,
+          "${aws_s3_bucket.todo_app_bucket.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy_attachment" "custom_service_discovery_policy_attachment" {
   role       = aws_iam_role.ecs_task_role.name
   policy_arn = aws_iam_policy.custom_service_disovery_permissions.arn
 }
 
-resource "aws_iam_role_policy_attachment" "custom_route53_policy_attachment" {
+resource "aws_iam_role_policy_attachment" "custom_route53_policy_attachment_task_role" {
+  role       = aws_iam_role.ecs_task_role.name
+  policy_arn = aws_iam_policy.custom_route53_permissions.arn
+}
+
+# temp for debug
+resource "aws_iam_role_policy_attachment" "custom_ecsexec_policy_attachment_task_role" {
+  role       = aws_iam_role.ecs_task_role.name
+  policy_arn = aws_iam_policy.custom_ecsexec_permissions.arn
+}
+
+resource "aws_iam_role_policy_attachment" "custom_route53_policy_attachment_exec_role" {
   role       = aws_iam_role.ecs_execution_role.name
   policy_arn = aws_iam_policy.custom_route53_permissions.arn
 }
 
-resource "aws_iam_role_policy_attachment" "custom_ecs_policy_attachment" {
+resource "aws_iam_role_policy_attachment" "custom_ssm_policy_attachment" {
   role       = aws_iam_role.ecs_task_role.name
-  policy_arn = aws_iam_policy.custom_ecs_permissions.arn
+  policy_arn = aws_iam_policy.custom_ssm_permissions.arn
 }
 
 resource "aws_iam_role_policy_attachment" "custom_ecr_policy_attachment" {
@@ -332,13 +480,35 @@ resource "aws_iam_role_policy_attachment" "cloudwatch_policy_attachment" {
   policy_arn = aws_iam_policy.custom_cloudwatch_permissions.arn
 }
 
-#private dns namespace for service discovery
+resource "aws_iam_role_policy_attachment" "custom_s3_policy_attachment" {
+  role       = aws_iam_role.ecs_task_role.name
+  policy_arn = aws_iam_policy.s3_policy_permissions.arn
+}
+
+resource "aws_iam_role_policy_attachment" "s3_role_policy_attachment" {
+  role       = aws_iam_role.s3_role.name
+  policy_arn = aws_iam_policy.s3_policy_permissions.arn
+
+}
+
+## Service discovery
 resource "aws_service_discovery_private_dns_namespace" "namespace" {
   name = "local"
   vpc  = aws_vpc.todo_vpc.id
 }
 
-#service discovery for backend
+resource "aws_service_discovery_service" "todo_frontend_service" {
+  name = "${var.app_name}-frontend-service"
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.namespace.id
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+    routing_policy = "MULTIVALUE"
+  }
+}
+
 resource "aws_service_discovery_service" "todo_backend_service" {
   name = "${var.app_name}-backend-service"
   dns_config {
@@ -351,7 +521,6 @@ resource "aws_service_discovery_service" "todo_backend_service" {
   }
 }
 
-#service discovery for database
 resource "aws_service_discovery_service" "todo_database_service" {
   name = "${var.app_name}-database-service"
   dns_config {
@@ -363,6 +532,8 @@ resource "aws_service_discovery_service" "todo_database_service" {
     routing_policy = "MULTIVALUE"
   }
 }
+
+## Security Groups
 
 # ECS Security Group for Tasks
 resource "aws_security_group" "ecs_tasks" {
@@ -381,6 +552,13 @@ resource "aws_security_group" "ecs_tasks" {
   ingress {
     from_port   = 27017 # for HTTP
     to_port     = 27017
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 80 # for HTTP
+    to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -432,9 +610,65 @@ resource "aws_security_group" "ecs_cluster" {
   }
 }
 
-# ECS Cluster
+## ECS
+
+# Define the ECS Cluster
 resource "aws_ecs_cluster" "todo_app_cluster" {
   name = "${var.app_name}-cluster"
+}
+
+# Frontend Task Definition
+resource "aws_ecs_task_definition" "frontend" {
+  family                   = "frontend"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_execution_role.arn
+  task_role_arn            = aws_iam_role.ecs_task_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "frontend"
+      image     = "${data.aws_ecr_repository.ts_frontend_repo.repository_url}:latest"
+      essential = true
+      portMappings = [{
+        containerPort = 80
+        hostPort = 80
+      }]
+
+      environment = [
+        {
+          name  = "REACT_APP_BACKEND_URI",
+          value = "${aws_service_discovery_service.todo_backend_service.name}.${aws_service_discovery_private_dns_namespace.namespace.name}:5000"
+        },
+        {
+          name  = "REACT_APP_NODEPORT",
+          value = "5000"
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.ecs-tasks.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "ts-frontend"
+        }
+      },
+
+      ##temp for debug
+      executeCommandConfiguration = {
+        logConfiguration = {
+          "cloudWatchLogGroupName"      = "temporary-debug-log-group",
+          "cloudWatchEncryptionEnabled" = false,
+          "s3BucketName"                = aws_s3_bucket.todo_app_bucket.id,
+          "s3EncryptionEnabled"         = false
+        },
+        logging = "DEFAULT"
+      }
+    }
+  ])
 }
 
 # Backend Task Definition
@@ -520,24 +754,63 @@ resource "aws_ecs_task_definition" "database" {
   ])
 }
 
-# Backend ECS Service
-resource "aws_ecs_service" "backend" {
-  name            = "backend-service"
+# Frontend ECS Service
+resource "aws_ecs_service" "frontend" {
+  name            = "frontend-service"
   cluster         = aws_ecs_cluster.todo_app_cluster.id
-  task_definition = aws_ecs_task_definition.backend.arn
+  task_definition = aws_ecs_task_definition.frontend.arn
   launch_type     = "FARGATE"
-  desired_count   = 1
+  desired_count   = var.desired_count
 
   network_configuration {
     subnets         = aws_subnet.private.*.id
     security_groups = [aws_security_group.ecs_tasks.id]
   }
 
-  # temp while testing
   load_balancer {
-    target_group_arn = aws_lb_target_group.todo_app_target_group.id
+    target_group_arn = aws_lb_target_group.todo_app_frontend_target_group.arn
+    container_name   = "frontend"
+    container_port   = 80
+  }
+
+  deployment_maximum_percent         = var.max_percentage
+  deployment_minimum_healthy_percent = var.min_percentage
+
+  lifecycle {
+    ignore_changes = [desired_count] //used to avoid Terraform to reset the desired_count if auto-scaling changes it.
+  }
+
+  service_registries {
+    registry_arn = aws_service_discovery_service.todo_frontend_service.arn
+  }
+
+  depends_on = [aws_lb.todo_app_lb, aws_ecs_service.backend, aws_ecs_service.database]
+}
+
+# Backend ECS Service
+resource "aws_ecs_service" "backend" {
+  name            = "backend-service"
+  cluster         = aws_ecs_cluster.todo_app_cluster.id
+  task_definition = aws_ecs_task_definition.backend.arn
+  launch_type     = "FARGATE"
+  desired_count   = var.desired_count
+
+  network_configuration {
+    subnets         = aws_subnet.private.*.id
+    security_groups = [aws_security_group.ecs_tasks.id]
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.todo_app_backend_target_group.arn
     container_name   = "backend"
     container_port   = 5000
+  }
+
+  deployment_maximum_percent         = var.max_percentage
+  deployment_minimum_healthy_percent = var.min_percentage
+
+  lifecycle {
+    ignore_changes = [desired_count] //used to avoid Terraform to reset the desired_count if auto-scaling changes it.
   }
 
   service_registries {
@@ -553,15 +826,184 @@ resource "aws_ecs_service" "database" {
   cluster         = aws_ecs_cluster.todo_app_cluster.id
   task_definition = aws_ecs_task_definition.database.arn
   launch_type     = "FARGATE"
-  desired_count   = 1
+  desired_count   = var.desired_count
 
   network_configuration {
     subnets         = aws_subnet.private.*.id
     security_groups = [aws_security_group.ecs_tasks.id]
   }
 
+  deployment_maximum_percent         = var.max_percentage
+  deployment_minimum_healthy_percent = var.min_percentage
+
+  lifecycle {
+    ignore_changes = [desired_count] //used to avoid Terraform to reset the desired_count if auto-scaling changes it.
+  }
+
   service_registries {
     registry_arn = aws_service_discovery_service.todo_database_service.arn
   }
 
+}
+
+# Autoscaling Targets
+resource "aws_appautoscaling_target" "ecs_frontend_target" {
+  max_capacity       = var.max_capacity
+  min_capacity       = var.min_capacity
+  resource_id        = "service/${aws_ecs_cluster.todo_app_cluster.name}/${aws_ecs_service.frontend.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_target" "ecs_backend_target" {
+  max_capacity       = var.max_capacity
+  min_capacity       = var.min_capacity
+  resource_id        = "service/${aws_ecs_cluster.todo_app_cluster.name}/${aws_ecs_service.backend.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_target" "ecs_database_target" {
+  max_capacity       = var.max_capacity
+  min_capacity       = var.min_capacity
+  resource_id        = "service/${aws_ecs_cluster.todo_app_cluster.name}/${aws_ecs_service.database.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+## Autoscaling Policies
+resource "aws_appautoscaling_policy" "frontend_scale_out" {
+  name               = "${var.app_name}-ecs-frontend-scale-out"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.ecs_frontend_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_frontend_target.scalable_dimension
+
+  policy_type = "TargetTrackingScaling"
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = var.target_value_scale_out
+    scale_in_cooldown  = var.scale_in_cooldown
+    scale_out_cooldown = var.scale_out_cooldown
+
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "frontend_scale_in" {
+  name               = "${var.app_name}-ecs-frontend-scale-in"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.ecs_frontend_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_frontend_target.scalable_dimension
+
+  policy_type = "StepScaling"
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 300
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = 1
+      metric_interval_lower_bound = 30
+      metric_interval_upper_bound = 50
+    }
+
+    step_adjustment {
+      scaling_adjustment          = 2
+      metric_interval_lower_bound = 50
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "backend_scale_out" {
+  name               = "${var.app_name}-ecs-backend-scale-out"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.ecs_backend_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_backend_target.scalable_dimension
+
+  policy_type = "TargetTrackingScaling"
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = var.target_value_scale_out
+    scale_in_cooldown  = var.scale_in_cooldown
+    scale_out_cooldown = var.scale_out_cooldown
+
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "backend_scale_in" {
+  name               = "${var.app_name}-ecs-backend-scale-in"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.ecs_backend_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_backend_target.scalable_dimension
+
+  policy_type = "StepScaling"
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 300
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = 1
+      metric_interval_lower_bound = 30
+      metric_interval_upper_bound = 50
+    }
+
+    step_adjustment {
+      scaling_adjustment          = 2
+      metric_interval_lower_bound = 50
+    }
+
+  }
+}
+
+resource "aws_appautoscaling_policy" "database_scale_out" {
+  name               = "${var.app_name}-ecs-database-scale-out"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.ecs_database_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_database_target.scalable_dimension
+
+  policy_type = "TargetTrackingScaling"
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = var.target_value_scale_out
+    scale_in_cooldown  = var.scale_in_cooldown
+    scale_out_cooldown = var.scale_out_cooldown
+
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "database_scale_in" {
+  name               = "${var.app_name}-ecs-database-scale-in"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.ecs_database_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_database_target.scalable_dimension
+
+  policy_type = "StepScaling"
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 300
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = 1
+      metric_interval_lower_bound = 30
+      metric_interval_upper_bound = 50
+    }
+
+    step_adjustment {
+      scaling_adjustment          = 2
+      metric_interval_lower_bound = 50
+    }
+  }
 }
