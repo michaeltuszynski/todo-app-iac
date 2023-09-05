@@ -8,10 +8,6 @@ data "aws_ecr_repository" "ts_backend_repo" {
 #   name = "ts_frontend_app"
 # }
 
-data "aws_ecr_repository" "ts_database_repo" {
-  name = "mongo"
-}
-
 ## Cloudwatch Log Group
 resource "aws_cloudwatch_log_group" "ecs-tasks" {
   name = "${var.app_name}-${var.app_environment}-ecs-tasks-logs"
@@ -63,12 +59,6 @@ resource "aws_subnet" "private" {
 resource "aws_internet_gateway" "gateway" {
   vpc_id = aws_vpc.todo_vpc.id
 }
-
-# resource "aws_route" "internet_access" {
-#   route_table_id         = aws_vpc.todo_vpc.main_route_table_id
-#   destination_cidr_block = "0.0.0.0/0"
-#   gateway_id             = aws_internet_gateway.gateway.id
-# }
 
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.todo_vpc.id
@@ -147,16 +137,6 @@ resource "aws_vpc_endpoint" "logs" {
   security_group_ids = [aws_security_group.ecs_tasks.id]
   subnet_ids         = aws_subnet.private.*.id
 }
-
-# VPC Endpoint for Parameter Store (SSM)
-resource "aws_vpc_endpoint" "ssm" {
-  vpc_id             = aws_vpc.todo_vpc.id
-  service_name       = "com.amazonaws.${var.region}.ssm"
-  vpc_endpoint_type  = "Interface"
-  security_group_ids = [aws_security_group.ecs_tasks.id]
-  subnet_ids         = aws_subnet.private.*.id
-}
-
 
 ## ALB Configuration
 resource "aws_security_group" "lb" {
@@ -277,17 +257,6 @@ resource "aws_lb_listener_rule" "back_end_rule" {
   }
 }
 
-
-
-## Database Params - move to Secrets Manager
-data "aws_ssm_parameter" "db_username" {
-  name = "/database/username"
-}
-
-data "aws_ssm_parameter" "db_password" {
-  name = "/database/password"
-}
-
 ## Create an S3 Bucket
 resource "random_pet" "bucket_name" {
   length = 2
@@ -348,18 +317,17 @@ resource "aws_iam_role" "s3_role" {
   })
 }
 
-resource "aws_iam_policy" "custom_ssm_permissions" {
-  name        = "ECSTaskCustomPermissions"
-  description = "Custom permissions for ECS tasks"
-
-  policy = jsonencode({
+resource "aws_iam_role" "docdb_cloudwatch_role" {
+  name = "DocDBCloudWatchRole"
+  assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
       {
-        Action = ["ssm:GetParameters"],
+        Action = "sts:AssumeRole",
         Effect = "Allow",
-        Resource = ["arn:aws:ssm:region:account-id:parameter/database/username",
-        "arn:aws:ssm:region:account-id:parameter/database/password"]
+        Principal = {
+          Service = "rds.amazonaws.com"
+        }
       }
     ]
   })
@@ -494,6 +462,68 @@ resource "aws_iam_policy" "s3_policy_permissions" {
   })
 }
 
+resource "aws_iam_policy" "ecs_secrets_access" {
+  name        = "ECSAccessToSecrets"
+  description = "Allow ECS tasks to retrieve secrets from Secrets Manager"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Action = [
+        "secretsmanager:GetSecretValue"
+      ],
+      Resource = aws_secretsmanager_secret.docdb_credentials.arn,
+      Effect   = "Allow"
+    }]
+  })
+}
+
+resource "aws_iam_policy" "ecs_docdb_access" {
+  name        = "ecs_docdb_access"
+  description = "Permissions for ECS to access DocumentDB and related EC2 resources."
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "DocDBFull",
+        Effect = "Allow",
+        Action = [
+          "docdb:*"
+        ],
+        Resource = "*"
+      },
+      {
+        Sid    = "EC2Networking",
+        Effect = "Allow",
+        Action = [
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeSecurityGroups"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "ecs_exec_ssm_policy" {
+  name        = "ECSExecSSMPolicy"
+  description = "My policy that grants ECS tasks permissions to use SSM for ECS Exec"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action   = ["ssm:StartSession", "ssm:TerminateSession", "ssm:ResumeSession"],
+        Effect   = "Allow",
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy_attachment" "custom_service_discovery_policy_attachment" {
   role       = aws_iam_role.ecs_task_role.name
   policy_arn = aws_iam_policy.custom_service_disovery_permissions.arn
@@ -507,11 +537,6 @@ resource "aws_iam_role_policy_attachment" "custom_route53_policy_attachment_task
 resource "aws_iam_role_policy_attachment" "custom_route53_policy_attachment_exec_role" {
   role       = aws_iam_role.ecs_execution_role.name
   policy_arn = aws_iam_policy.custom_route53_permissions.arn
-}
-
-resource "aws_iam_role_policy_attachment" "custom_ssm_policy_attachment" {
-  role       = aws_iam_role.ecs_task_role.name
-  policy_arn = aws_iam_policy.custom_ssm_permissions.arn
 }
 
 resource "aws_iam_role_policy_attachment" "custom_ecr_policy_attachment" {
@@ -532,7 +557,32 @@ resource "aws_iam_role_policy_attachment" "custom_s3_policy_attachment" {
 resource "aws_iam_role_policy_attachment" "s3_role_policy_attachment" {
   role       = aws_iam_role.s3_role.name
   policy_arn = aws_iam_policy.s3_policy_permissions.arn
+}
 
+resource "aws_iam_role_policy_attachment" "ecs_exec_ssm_policy" {
+  role       = aws_iam_role.ecs_execution_role.name
+  policy_arn = aws_iam_policy.ecs_exec_ssm_policy.arn
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_secrets_access_attachment" {
+  role       = aws_iam_role.ecs_task_role.name
+  policy_arn = aws_iam_policy.ecs_secrets_access.arn
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_secrets_access_exec_attachment" {
+  role       = aws_iam_role.ecs_execution_role.name
+  policy_arn = aws_iam_policy.ecs_secrets_access.arn
+}
+
+
+resource "aws_iam_role_policy_attachment" "ecs_docdb_attach" {
+  role       = aws_iam_role.ecs_task_role.name
+  policy_arn = aws_iam_policy.ecs_docdb_access.arn
+}
+
+resource "aws_iam_role_policy_attachment" "docdb_cloudwatch_attach" {
+  role       = aws_iam_role.docdb_cloudwatch_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonRDSFullAccess"
 }
 
 ## Service discovery
@@ -573,22 +623,6 @@ resource "aws_service_discovery_service" "todo_backend_service" {
   }
 }
 
-resource "aws_service_discovery_service" "todo_database_service" {
-  name = "${var.app_name}-database-service"
-  dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.namespace.id
-    dns_records {
-      ttl  = 10
-      type = "A"
-    }
-    routing_policy = "MULTIVALUE"
-  }
-
-  health_check_custom_config {
-    failure_threshold = 10
-  }
-}
-
 ## Security Groups
 
 # ECS Security Group for Tasks
@@ -609,7 +643,7 @@ resource "aws_security_group" "ecs_tasks" {
     from_port   = 27017 # for HTTP
     to_port     = 27017
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["0.0.0.0/0", aws_vpc.todo_vpc.cidr_block]
   }
 
   ingress {
@@ -631,6 +665,32 @@ resource "aws_security_group" "ecs_tasks" {
     Name = "ecs_tasks_sg"
   }
 }
+
+resource "aws_security_group" "docdb_sg" {
+  name        = "docdb_sg"
+  description = "Security group for DocumentDB"
+  vpc_id      = aws_vpc.todo_vpc.id
+
+  ingress {
+    from_port   = 27017
+    to_port     = 27017
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0", aws_vpc.todo_vpc.cidr_block]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "docdb_sg"
+  }
+}
+
+
 
 # ECS Cluster Security Group
 resource "aws_security_group" "ecs_cluster" {
@@ -663,6 +723,52 @@ resource "aws_security_group" "ecs_cluster" {
 
   tags = {
     Name = "ecs_cluster_sg"
+  }
+}
+
+resource "random_password" "db_password" {
+  length  = 16
+  special = false
+}
+
+resource "random_pet" "secret_name" {
+  length = 2
+}
+
+resource "aws_secretsmanager_secret" "docdb_credentials" {
+  name = "${var.app_name}-docdb_credentials-${random_pet.secret_name.id}"
+}
+
+resource "aws_secretsmanager_secret_version" "db_secret_version" {
+  secret_id     = aws_secretsmanager_secret.docdb_credentials.id
+  secret_string = "{\"username\":\"root\", \"password\":\"${random_password.db_password.result}\"}"
+}
+
+## DocumentDB (Mongo on AWS)
+resource "aws_docdb_cluster" "todo_app_docdb_cluster" {
+  cluster_identifier              = "todo-app-docdb-cluster"
+  skip_final_snapshot             = true
+  engine_version                  = "4.0"
+  backup_retention_period         = 1
+  enabled_cloudwatch_logs_exports = ["audit", "profiler"]
+  master_username                 = jsondecode(aws_secretsmanager_secret_version.db_secret_version.secret_string)["username"]
+  master_password                 = jsondecode(aws_secretsmanager_secret_version.db_secret_version.secret_string)["password"]
+  db_subnet_group_name            = aws_docdb_subnet_group.default.name
+  vpc_security_group_ids          = [aws_security_group.docdb_sg.id]
+}
+
+resource "aws_docdb_cluster_instance" "docdb_instance" {
+  identifier         = "docdb-instance"
+  cluster_identifier = aws_docdb_cluster.todo_app_docdb_cluster.cluster_identifier
+  instance_class     = "db.r5.large"
+}
+
+resource "aws_docdb_subnet_group" "default" {
+  name       = "main"
+  subnet_ids = aws_subnet.private.*.id
+
+  tags = {
+    Name = "default"
   }
 }
 
@@ -734,10 +840,19 @@ resource "aws_ecs_task_definition" "backend" {
         containerPort = 5000
       }]
 
+
+      secrets = [{
+        name      = "DB_USER",
+        valueFrom = "${aws_secretsmanager_secret_version.db_secret_version.arn}:username::"
+        }, {
+        name      = "DB_PASSWORD",
+        valueFrom = "${aws_secretsmanager_secret_version.db_secret_version.arn}:password::"
+      }]
+
       environment = [
         {
-          name  = "MONGODB_URI",
-          value = "mongodb://${data.aws_ssm_parameter.db_username.value}:${data.aws_ssm_parameter.db_password.value}@${aws_service_discovery_service.todo_database_service.name}.${aws_service_discovery_private_dns_namespace.namespace.name}:27017/?authSource=admin&readPreference=primary&ssl=false&directConnection=true"
+          name  = "DB_ENDPOINT",
+          value = aws_docdb_cluster_instance.docdb_instance.endpoint
         },
         {
           name  = "NODEPORT",
@@ -751,47 +866,6 @@ resource "aws_ecs_task_definition" "backend" {
           "awslogs-group"         = aws_cloudwatch_log_group.ecs-tasks.name
           "awslogs-region"        = var.region
           "awslogs-stream-prefix" = "ts-backend"
-        }
-      }
-    }
-  ])
-}
-
-# Database Task Definition
-resource "aws_ecs_task_definition" "database" {
-  family                   = "database"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
-  execution_role_arn       = aws_iam_role.ecs_execution_role.arn
-  task_role_arn            = aws_iam_role.ecs_task_role.arn
-
-  container_definitions = jsonencode([
-    {
-      name  = "database"
-      image = "${data.aws_ecr_repository.ts_database_repo.repository_url}:latest"
-      portMappings = [{
-        containerPort = 27017
-      }]
-
-      environment = [
-        {
-          name  = "MONGO_INITDB_ROOT_USERNAME",
-          value = "${data.aws_ssm_parameter.db_username.value}"
-        },
-        {
-          name  = "MONGO_INITDB_ROOT_PASSWORD",
-          value = "${data.aws_ssm_parameter.db_password.value}"
-        }
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.ecs-tasks.name
-          "awslogs-region"        = var.region
-          "awslogs-stream-prefix" = "ts-database"
         }
       }
     }
@@ -861,34 +935,10 @@ resource "aws_ecs_service" "backend" {
     registry_arn = aws_service_discovery_service.todo_backend_service.arn
   }
 
-  depends_on = [aws_lb.todo_app_lb, aws_ecs_service.database]
+  depends_on = [aws_lb.todo_app_lb, aws_docdb_cluster.todo_app_docdb_cluster]
 }
 
-# Database ECS Service
-resource "aws_ecs_service" "database" {
-  name            = "database-service"
-  cluster         = aws_ecs_cluster.todo_app_cluster.id
-  task_definition = aws_ecs_task_definition.database.arn
-  launch_type     = "FARGATE"
-  desired_count   = var.desired_count
 
-  network_configuration {
-    subnets         = aws_subnet.private.*.id
-    security_groups = [aws_security_group.ecs_tasks.id]
-  }
-
-  deployment_maximum_percent         = var.max_percentage
-  deployment_minimum_healthy_percent = var.min_percentage
-
-  lifecycle {
-    ignore_changes = [desired_count] //used to avoid Terraform to reset the desired_count if auto-scaling changes it.
-  }
-
-  service_registries {
-    registry_arn = aws_service_discovery_service.todo_database_service.arn
-  }
-
-}
 
 # Autoscaling Targets
 # resource "aws_appautoscaling_target" "ecs_frontend_target" {
@@ -907,13 +957,7 @@ resource "aws_appautoscaling_target" "ecs_backend_target" {
   service_namespace  = "ecs"
 }
 
-resource "aws_appautoscaling_target" "ecs_database_target" {
-  max_capacity       = var.max_capacity
-  min_capacity       = var.min_capacity
-  resource_id        = "service/${aws_ecs_cluster.todo_app_cluster.name}/${aws_ecs_service.database.name}"
-  scalable_dimension = "ecs:service:DesiredCount"
-  service_namespace  = "ecs"
-}
+
 
 # ## Autoscaling Policies
 # resource "aws_appautoscaling_policy" "frontend_scale_out" {
@@ -1007,47 +1051,3 @@ resource "aws_appautoscaling_policy" "backend_scale_in" {
   }
 }
 
-resource "aws_appautoscaling_policy" "database_scale_out" {
-  name               = "${var.app_name}-ecs-database-scale-out"
-  service_namespace  = "ecs"
-  resource_id        = aws_appautoscaling_target.ecs_database_target.resource_id
-  scalable_dimension = aws_appautoscaling_target.ecs_database_target.scalable_dimension
-
-  policy_type = "TargetTrackingScaling"
-
-  target_tracking_scaling_policy_configuration {
-    target_value       = var.target_value_scale_out
-    scale_in_cooldown  = var.scale_in_cooldown
-    scale_out_cooldown = var.scale_out_cooldown
-
-    predefined_metric_specification {
-      predefined_metric_type = "ECSServiceAverageCPUUtilization"
-    }
-  }
-}
-
-resource "aws_appautoscaling_policy" "database_scale_in" {
-  name               = "${var.app_name}-ecs-database-scale-in"
-  service_namespace  = "ecs"
-  resource_id        = aws_appautoscaling_target.ecs_database_target.resource_id
-  scalable_dimension = aws_appautoscaling_target.ecs_database_target.scalable_dimension
-
-  policy_type = "StepScaling"
-
-  step_scaling_policy_configuration {
-    adjustment_type         = "ChangeInCapacity"
-    cooldown                = 300
-    metric_aggregation_type = "Average"
-
-    step_adjustment {
-      scaling_adjustment          = 1
-      metric_interval_lower_bound = 30
-      metric_interval_upper_bound = 50
-    }
-
-    step_adjustment {
-      scaling_adjustment          = 2
-      metric_interval_lower_bound = 50
-    }
-  }
-}
