@@ -2,6 +2,6 @@ output "load_balancer_ip" {
   value = aws_lb.todo_app_lb.dns_name
 }
 
-output "s3_bucket_name" {
-  value = aws_s3_bucket.todo_app_bucket.id
+output "cloudfront_domain_name" {
+  value = aws_cloudfront_distribution.s3_distribution.domain_name
 }
