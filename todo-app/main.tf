@@ -141,17 +141,10 @@ resource "aws_security_group" "lb" {
 
   ingress {
     protocol    = "tcp"
-    from_port   = 5000
+    from_port   = 443
     to_port     = 5000
     cidr_blocks = ["0.0.0.0/0"]
   }
-
-  # ingress {
-  #   protocol    = "tcp"
-  #   from_port   = 80
-  #   to_port     = 80
-  #   cidr_blocks = ["0.0.0.0/0"]
-  # }
 
   egress {
     from_port   = 0
@@ -190,10 +183,24 @@ resource "aws_lb_target_group" "todo_app_backend_target_group" {
   }
 }
 
+data "aws_acm_certificate" "ssl_cert" {
+  domain   = "mptdemo.com"
+  statuses = ["ISSUED"]
+}
+
+# data "aws_acm_certificate" "cf_distro" {
+#   domain = "www.mptdemo.com"
+#   most_recent = true
+
+#   provider = aws.us-east-1
+# }
+
 resource "aws_lb_listener" "todo_app_alb_listener" {
   load_balancer_arn = aws_lb.todo_app_lb.id
-  port              = 5000
-  protocol          = "HTTP"
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  certificate_arn   = data.aws_acm_certificate.ssl_cert.arn
 
   default_action {
     type = "fixed-response"
@@ -227,7 +234,8 @@ resource "random_pet" "bucket_name" {
 }
 
 resource "aws_s3_bucket" "todo_app_website" {
-  bucket = "${var.app_name}-bucket-${random_pet.bucket_name.id}"
+  bucket        = "${var.app_name}-bucket-${random_pet.bucket_name.id}"
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_website_configuration" "frontend_website" {
@@ -285,6 +293,9 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
 
   viewer_certificate {
     cloudfront_default_certificate = true
+    # acm_certificate_arn      = data.aws_acm_certificate.cf_distro.arn
+    # ssl_support_method       = "sni-only"
+    # minimum_protocol_version = "TLSv1.2_2019"
   }
 }
 
@@ -309,17 +320,6 @@ resource "aws_s3_bucket_policy" "website" {
       }
     ]
   })
-}
-
-resource "aws_s3_bucket_object" "bucket_output_object" {
-  bucket = aws_s3_bucket.todo_app_website.bucket
-  key    = "config.json"
-  content = jsonencode({
-    REACT_APP_BACKEND_URI = aws_lb.todo_app_lb.dns_name
-  })
-
-
-  depends_on = [aws_s3_bucket.todo_app_website, aws_lb.todo_app_lb]
 }
 
 ## IAM Roles and Policies
