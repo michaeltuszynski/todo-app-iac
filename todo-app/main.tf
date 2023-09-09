@@ -8,10 +8,10 @@ data "aws_ecr_repository" "ts_backend_repo" {
 resource "aws_cloudwatch_log_group" "ecs-tasks" {
   name = "${var.app_name}-${var.app_environment}-ecs-tasks-logs"
 
-  tags = {
-    Application = var.app_name
-    Environment = var.app_environment
-  }
+  # tags = {
+  #   Application = var.app_name
+  #   Environment = var.app_environment
+  # }
 }
 
 ## Network Configuration
@@ -23,10 +23,10 @@ resource "aws_vpc" "todo_vpc" {
   cidr_block           = "10.10.0.0/16"
   enable_dns_hostnames = true
   enable_dns_support   = true
-  tags = {
-    Name        = "${var.app_name}-vpc"
-    Environment = var.app_environment
-  }
+  # tags = {
+  #   Name        = "${var.app_name}-vpc"
+  #   Environment = var.app_environment
+  # }
 }
 
 resource "aws_subnet" "public" {
@@ -134,16 +134,30 @@ resource "aws_vpc_endpoint" "logs" {
   subnet_ids         = aws_subnet.private.*.id
 }
 
-## ALB Configuration
-resource "aws_security_group" "lb" {
-  name   = "todo-alb-security-group"
-  vpc_id = aws_vpc.todo_vpc.id
+resource "aws_security_group" "alb_sg" {
+  name        = "alb-sg"
+  vpc_id      = aws_vpc.todo_vpc.id
+  description = "Security group for the ALB"
 
   ingress {
+    from_port   = 80
+    to_port     = 80
     protocol    = "tcp"
-    from_port   = 443
-    to_port     = 5000
     cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 5000
+    to_port     = 5000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0", aws_vpc.todo_vpc.cidr_block]
   }
 
   egress {
@@ -154,14 +168,20 @@ resource "aws_security_group" "lb" {
   }
 }
 
-resource "aws_lb" "todo_app_lb" {
-  name            = "todo-app-lb"
-  subnets         = aws_subnet.public.*.id
-  security_groups = [aws_security_group.lb.id]
+resource "aws_lb" "todo_app_alb" {
+  name                       = "${var.app_name}-alb"
+  internal                   = false
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.alb_sg.id]
+  enable_deletion_protection = false
+  enable_http2               = true
+  subnets                    = aws_subnet.public.*.id
+
+  enable_cross_zone_load_balancing = true
 }
 
-resource "aws_lb_target_group" "todo_app_backend_target_group" {
-  name        = "${var.app_name}-backend-target-group"
+resource "aws_lb_target_group" "default" {
+  name        = "default-tg"
   port        = 5000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.todo_vpc.id
@@ -176,49 +196,28 @@ resource "aws_lb_target_group" "todo_app_backend_target_group" {
     path                = "/health"
     unhealthy_threshold = "2"
   }
-
-  tags = {
-    Name        = "${var.app_name}-lb-tg"
-    Environment = var.app_environment
-  }
 }
 
-data "aws_acm_certificate" "ssl_cert" {
-  domain   = "mptdemo.com"
-  statuses = ["ISSUED"]
-}
-
-# data "aws_acm_certificate" "cf_distro" {
-#   domain = "www.mptdemo.com"
-#   most_recent = true
-
-#   provider = aws.us-east-1
-# }
-
-resource "aws_lb_listener" "todo_app_alb_listener" {
-  load_balancer_arn = aws_lb.todo_app_lb.id
-  port              = 443
+resource "aws_lb_listener" "https_listener" {
+  load_balancer_arn = aws_lb.todo_app_alb.arn
+  port              = "443"
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-2016-08"
   certificate_arn   = data.aws_acm_certificate.ssl_cert.arn
 
   default_action {
-    type = "fixed-response"
-    fixed_response {
-      content_type = "text/plain"
-      message_body = "404: Not Found"
-      status_code  = "404"
-    }
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.default.arn
   }
 }
 
 resource "aws_lb_listener_rule" "back_end_rule" {
-  listener_arn = aws_lb_listener.todo_app_alb_listener.arn
+  listener_arn = aws_lb_listener.https_listener.arn
   priority     = 200
 
   action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.todo_app_backend_target_group.arn
+    target_group_arn = aws_lb_target_group.default.arn
   }
 
   condition {
@@ -227,6 +226,114 @@ resource "aws_lb_listener_rule" "back_end_rule" {
     }
   }
 }
+
+
+
+resource "aws_route53_record" "alias_record" {
+  zone_id = var.hosted_zone_id
+  name    = "backend.mptdemo.com."
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.todo_app_alb.dns_name
+    zone_id                = aws_lb.todo_app_alb.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# ## ALB Configuration
+# resource "aws_security_group" "lb" {
+#   name   = "todo-alb-security-group"
+#   vpc_id = aws_vpc.todo_vpc.id
+
+#   ingress {
+#     protocol    = "tcp"
+#     from_port   = 443
+#     to_port     = 5000
+#     cidr_blocks = ["0.0.0.0/0"]
+#   }
+
+#   egress {
+#     from_port   = 0
+#     to_port     = 0
+#     protocol    = "-1"
+#     cidr_blocks = ["0.0.0.0/0"]
+#   }
+# }
+
+# resource "aws_lb" "todo_app_lb" {
+#   name            = "todo-app-lb"
+#   subnets         = aws_subnet.public.*.id
+#   security_groups = [aws_security_group.lb.id]
+# }
+
+# resource "aws_lb_target_group" "todo_app_backend_target_group" {
+#   name        = "${var.app_name}-backend-target-group"
+#   port        = 5000
+#   protocol    = "HTTP"
+#   vpc_id      = aws_vpc.todo_vpc.id
+#   target_type = "ip"
+
+#   health_check {
+#     healthy_threshold   = "3"
+#     interval            = "60"
+#     protocol            = "HTTP"
+#     matcher             = "200"
+#     timeout             = "3"
+#     path                = "/health"
+#     unhealthy_threshold = "2"
+#   }
+
+#   tags = {
+#     Name        = "${var.app_name}-lb-tg"
+#     Environment = var.app_environment
+#   }
+# }
+
+data "aws_acm_certificate" "ssl_cert" {
+  domain   = "mptdemo.com"
+  statuses = ["ISSUED"]
+}
+
+data "aws_acm_certificate" "cf_distro" {
+  domain      = "www.mptdemo.com"
+  most_recent = true
+
+  provider = aws.east
+}
+
+# resource "aws_lb_listener" "todo_app_alb_listener" {
+#   load_balancer_arn = aws_lb.todo_app_lb.id
+#   port              = 443
+#   protocol          = "HTTPS"
+#   ssl_policy        = "ELBSecurityPolicy-2016-08"
+#   certificate_arn   = data.aws_acm_certificate.ssl_cert.arn
+
+#   default_action {
+#     type = "fixed-response"
+#     fixed_response {
+#       content_type = "text/plain"
+#       message_body = "404: Not Found"
+#       status_code  = "404"
+#     }
+#   }
+# }
+
+# resource "aws_lb_listener_rule" "back_end_rule" {
+#   listener_arn = aws_lb_listener.todo_app_alb_listener.arn
+#   priority     = 200
+
+#   action {
+#     type             = "forward"
+#     target_group_arn = aws_lb_target_group.todo_app_backend_target_group.arn
+#   }
+
+#   condition {
+#     path_pattern {
+#       values = ["/health", "/todos"]
+#     }
+#   }
+# }
 
 ## Create an S3 Bucket
 resource "random_pet" "bucket_name" {
@@ -291,11 +398,25 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
     }
   }
 
+  aliases = ["www.mptdemo.com"]
+
   viewer_certificate {
-    cloudfront_default_certificate = true
-    # acm_certificate_arn      = data.aws_acm_certificate.cf_distro.arn
-    # ssl_support_method       = "sni-only"
-    # minimum_protocol_version = "TLSv1.2_2019"
+    # cloudfront_default_certificate = true
+    acm_certificate_arn      = data.aws_acm_certificate.cf_distro.arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2019"
+  }
+}
+
+resource "aws_route53_record" "cloudfront_alias_record" {
+  zone_id = var.hosted_zone_id
+  name    = "www.mptdemo.com."
+  type    = "A"
+
+  alias {
+    name                   = aws_cloudfront_distribution.s3_distribution.domain_name
+    zone_id                = aws_cloudfront_distribution.s3_distribution.hosted_zone_id
+    evaluate_target_health = false
   }
 }
 
@@ -678,7 +799,7 @@ resource "aws_secretsmanager_secret_version" "db_secret_version" {
 resource "aws_docdb_cluster" "todo_app_docdb_cluster" {
   cluster_identifier              = "todo-app-docdb-cluster"
   skip_final_snapshot             = true
-  engine_version                  = "4.0"
+  engine_version                  = "4.0.0"
   backup_retention_period         = 1
   enabled_cloudwatch_logs_exports = ["audit", "profiler"]
   master_username                 = jsondecode(aws_secretsmanager_secret_version.db_secret_version.secret_string)["username"]
@@ -774,7 +895,8 @@ resource "aws_ecs_service" "backend" {
   }
 
   load_balancer {
-    target_group_arn = aws_lb_target_group.todo_app_backend_target_group.arn
+    #target_group_arn = aws_lb_target_group.todo_app_backend_target_group.arn
+    target_group_arn = aws_lb_target_group.default.arn
     container_name   = "backend"
     container_port   = 5000
   }
@@ -786,7 +908,8 @@ resource "aws_ecs_service" "backend" {
     ignore_changes = [desired_count] //used to avoid Terraform to reset the desired_count if auto-scaling changes it.
   }
 
-  depends_on = [aws_lb.todo_app_lb, aws_docdb_cluster.todo_app_docdb_cluster]
+  #depends_on = [aws_lb.todo_app_lb, aws_docdb_cluster.todo_app_docdb_cluster]
+  depends_on = [aws_lb.todo_app_alb, aws_docdb_cluster.todo_app_docdb_cluster]
 }
 
 

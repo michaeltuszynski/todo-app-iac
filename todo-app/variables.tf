@@ -58,6 +58,10 @@ variable "scale_out_cooldown" {
   default = 60
 }
 
+variable "hosted_zone_id" {
+  type    = string
+  default = "Z0439624142VIWL59PRLZ"
+}
 
 
 
