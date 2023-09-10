@@ -1,9 +1,12 @@
-
 variable "github_owner" {
   type = string
 }
 
-variable "github_repo" {
+variable "github_frontend_repo" {
+  type = string
+}
+
+variable "github_backend_repo" {
   type = string
 }
 
@@ -11,34 +14,62 @@ variable "github_token" {
   type = string
 }
 
-variable "todo_app_bucket" {
+variable "frontend_bucket" {
   type = string
 }
 
-variable "todo_app_cloudfront_distribution_id" {
-  type = string
-}
-
-variable "todo_app_backend_url" {
+variable "cloudfront_distribution_id" {
   type = string
 }
 
 variable "region" {
-  type    = string
-  default = "us-west-2"
+  type = string
 }
 
 variable "lambda_empty_s3_output" {
   type    = string
-  default = "lambda/empty_s3/index.zip"
+  default = "./ci-cd/lambda/empty_s3/index.zip"
 }
 
 variable "lambda_invalidate_cf_output" {
   type    = string
-  default = "lambda/invalidate_cf/index.zip"
+  default = "./ci-cd/lambda/invalidate_cf/index.zip"
 }
 
 variable "lambda_write_config_output" {
   type    = string
-  default = "lambda/write_config/index.zip"
+  default = "./ci-cd/lambda/write_config/index.zip"
+}
+
+variable "image_name" {
+  type    = string
+  default = "ts_backend_app"
+}
+
+variable "cluster_name" {
+  type = string
+}
+
+variable "service_name" {
+  type = string
+}
+
+variable "db_port" {
+  type = number
+}
+
+variable "backend_port" {
+  type = number
+}
+
+variable "app_name" {
+  type = string
+}
+
+variable "bucket_name" {
+  type = string
+}
+
+variable "backend_url" {
+  type = string
 }

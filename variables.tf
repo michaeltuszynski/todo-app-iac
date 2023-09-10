@@ -1,17 +1,32 @@
 variable "app_name" {
   type    = string
-  default = "todo"
 }
 
 variable "app_environment" {
   type    = string
-  default = "production"
 }
 
 variable "region" {
-  type    = string
-  default = "us-west-2"
+  type = string
 }
+
+variable "backend_port" {
+  type = string
+}
+
+variable "db_port" {
+  type = string
+}
+
+variable "custom_domain_name" {
+  type = string
+}
+
+variable "hosted_zone_id" {
+  type = string
+}
+
+####
 
 variable "min_capacity" {
   type    = number
@@ -58,10 +73,24 @@ variable "scale_out_cooldown" {
   default = 60
 }
 
-variable "hosted_zone_id" {
-  type    = string
-  default = "Z0439624142VIWL59PRLZ"
+
+variable "github_owner" {
+  type = string
 }
+
+variable "github_frontend_repo" {
+  type = string
+}
+
+variable "github_backend_repo" {
+  type = string
+}
+
+variable "github_token" {
+  type = string
+}
+
+
 
 
 
