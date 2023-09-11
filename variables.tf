@@ -1,3 +1,4 @@
+## Input Variables
 variable "app_name" {
   type    = string
 }
@@ -18,6 +19,11 @@ variable "db_port" {
   type = string
 }
 
+variable "https_port" {
+  type = number
+  default = 443
+}
+
 variable "custom_domain_name" {
   type = string
 }
@@ -26,7 +32,23 @@ variable "hosted_zone_id" {
   type = string
 }
 
-####
+variable "github_owner" {
+  type = string
+}
+
+variable "github_frontend_repo" {
+  type = string
+}
+
+variable "github_backend_repo" {
+  type = string
+}
+
+variable "github_token" {
+  type = string
+}
+
+## Default Variables
 
 variable "min_capacity" {
   type    = number
@@ -74,21 +96,6 @@ variable "scale_out_cooldown" {
 }
 
 
-variable "github_owner" {
-  type = string
-}
-
-variable "github_frontend_repo" {
-  type = string
-}
-
-variable "github_backend_repo" {
-  type = string
-}
-
-variable "github_token" {
-  type = string
-}
 
 
 

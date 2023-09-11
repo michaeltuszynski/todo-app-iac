@@ -43,7 +43,7 @@ variable "lambda_write_config_output" {
 
 variable "image_name" {
   type    = string
-  default = "ts_backend_app"
+  default = "backend_app"
 }
 
 variable "cluster_name" {
@@ -66,10 +66,6 @@ variable "app_name" {
   type = string
 }
 
-variable "bucket_name" {
-  type = string
-}
-
-variable "backend_url" {
+variable "custom_domain_name" {
   type = string
 }

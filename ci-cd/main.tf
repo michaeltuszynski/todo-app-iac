@@ -210,9 +210,9 @@ resource "aws_iam_role_policy_attachment" "codepipeline_policy_attach" {
   policy_arn = aws_iam_policy.codepipeline_policy.arn
 }
 
-resource "aws_ecr_repository" "ts_backend_app" {
-  name                 = "ts_backend_app"
-  image_tag_mutability = "MUTABLE"
+resource "aws_ecr_repository" "backend_app" {
+  name                 = "backend_app"
+  image_tag_mutability = "IMMUTABLE"
 
   # Enable image scanning on push
   image_scanning_configuration {
@@ -220,23 +220,40 @@ resource "aws_ecr_repository" "ts_backend_app" {
   }
 
   force_delete = true
-  # Life-cycle policy to clean up untagged images or older images
-  # lifecycle_policy {
-  #   policy = jsonencode({
-  #     rules = [{
-  #       rulePriority = 1
-  #       description  = "Expire untagged images"
-  #       selection = {
-  #         tagStatus   = "untagged"
-  #         countType   = "imageCountMoreThan"
-  #         countNumber = 10
-  #       }
-  #       action = {
-  #         type = "expire"
-  #       }
-  #     }]
-  #   })
-  # }
+}
+
+resource "aws_ecr_lifecycle_policy" "cleanup_policy" {
+  repository = aws_ecr_repository.backend_app.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Expire untagged images"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "imageCountMoreThan"
+          countNumber = 10
+        }
+        action = {
+          type = "expire"
+        }
+      },
+      {
+        rulePriority = 2
+        description  = "Expire images older than 30 days"
+        selection = {
+          tagStatus   = "any"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 5
+        }
+        action = {
+          type = "expire"
+        }
+      }
+    ]
+  })
 }
 
 
@@ -285,7 +302,7 @@ resource "aws_codebuild_project" "backend" {
         pre_build = {
           commands = [
             "echo Logging in to Amazon ECR...",
-            "aws ecr get-login-password --region ${var.region} | docker login --username AWS --password-stdin ${aws_ecr_repository.ts_backend_app.repository_url}"
+            "aws ecr get-login-password --region ${var.region} | docker login --username AWS --password-stdin ${aws_ecr_repository.backend_app.repository_url}"
           ]
         }
         install = {
@@ -301,9 +318,9 @@ resource "aws_codebuild_project" "backend" {
           commands = [
             "yarn build",
             "echo Building the Docker image...",
-            "docker build -t ${aws_ecr_repository.ts_backend_app.repository_url}:latest .",
-            "docker push ${aws_ecr_repository.ts_backend_app.repository_url}:latest",
-            "printf '[{\"name\":\"backend\",\"imageUri\":\"${aws_ecr_repository.ts_backend_app.repository_url}:latest\"}]' > imagedefinitions.json",
+            "docker build -t ${aws_ecr_repository.backend_app.repository_url}:latest .",
+            "docker push ${aws_ecr_repository.backend_app.repository_url}:latest",
+            "printf '[{\"name\":\"backend\",\"imageUri\":\"${aws_ecr_repository.backend_app.repository_url}:latest\"}]' > imagedefinitions.json",
             "cat imagedefinitions.json"
           ]
         }
@@ -354,6 +371,10 @@ resource "aws_cloudwatch_event_target" "send_to_cloudwatch_logs" {
   rule      = aws_cloudwatch_event_rule.codepipeline_events.name
   arn       = aws_cloudwatch_log_group.codepipeline_log_group.arn
   target_id = "CodePipelineToCloudWatch"
+}
+
+locals {
+  backend_url = "backend.${var.custom_domain_name}"
 }
 
 # CodePipeline for frontend app
@@ -450,7 +471,7 @@ resource "aws_codepipeline" "frontend" {
         UserParameters = jsonencode({
           bucket_name = var.frontend_bucket
           environment_variables = {
-            REACT_APP_BACKEND_URL = var.backend_url
+            REACT_APP_BACKEND_URL = local.backend_url
           }
         })
       }
@@ -587,6 +608,18 @@ data "archive_file" "lambda_write_config_zip" {
   type        = "zip"
   source_file = "./ci-cd/lambda/write_config/index.py"
   output_path = var.lambda_write_config_output
+}
+
+resource "aws_cloudwatch_log_group" "empty_s3_log_group" {
+  name = "/aws/lambda/${aws_lambda_function.empty_s3.function_name}"
+}
+
+resource "aws_cloudwatch_log_group" "invalidate_cf_log_group" {
+  name = "/aws/lambda/${aws_lambda_function.invalidate_cf.function_name}"
+}
+
+resource "aws_cloudwatch_log_group" "write_config_log_group" {
+  name = "/aws/lambda/${aws_lambda_function.write_config.function_name}"
 }
 
 resource "aws_lambda_function" "empty_s3" {

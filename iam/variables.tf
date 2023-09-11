@@ -13,3 +13,9 @@ variable "secret_arn" {
 variable "bucket_arn" {
   type = string
 }
+
+variable "backend_repository_arn" {
+  type = string
+}
+
+

@@ -13,3 +13,7 @@ variable "application_security_group_id" {
 variable "region" {
   type = string
 }
+
+variable "app_name" {
+  type = string
+}

@@ -1,4 +1,4 @@
-## Cloudwatch Log Group
+## ALB Cloudwatch Log Group
 resource "aws_cloudwatch_log_group" "this" {
   name = "alb-log-group"
 }
@@ -76,38 +76,32 @@ resource "aws_lb_listener" "https_listener" {
     target_group_arn = aws_lb_target_group.default.arn
   }
 
-  #depends_on = [aws_lb_target_group.default]
+  depends_on = [aws_lb_target_group.default]
 }
 
-# resource "aws_lb_listener_rule" "not_found_response" {
-#   listener_arn = aws_lb_listener.https_listener.arn
+resource "aws_lb_listener_rule" "not_found_response" {
+  listener_arn = aws_lb_listener.https_listener.arn
 
-#   # This condition effectively matches all paths.
-#   condition {
-#     path_pattern {
-#       values = ["/*"]
-#     }
-#   }
+  # This condition effectively matches all paths.
+  condition {
+    path_pattern {
+      values = ["/*"]
+    }
+  }
 
-#   action {
-#     type = "fixed-response"
+  action {
+    type = "fixed-response"
 
-#     fixed_response {
-#       content_type = "text/plain"
-#       message_body = "Not Found"
-#       status_code  = "404"
-#     }
-#   }
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Not Found"
+      status_code  = "404"
+    }
+  }
 
-#   # Setting priority to a high value ensures this is the last rule to be evaluated.
-#   priority = 999
-# }
-
-
-
-
-
-
+  # Setting priority to a high value ensures this is the last rule to be evaluated.
+  priority = 999
+}
 
 resource "aws_lb_listener_rule" "back_end_rule" {
   listener_arn = aws_lb_listener.https_listener.arn
@@ -130,7 +124,7 @@ data "aws_acm_certificate" "ssl_cert" {
   statuses = ["ISSUED"]
 }
 
-resource "aws_route53_record" "alias_record" {
+resource "aws_route53_record" "backend_alias_record" {
   zone_id = var.hosted_zone_id
   name    = "backend.${var.custom_domain_name}."
   type    = "A"
