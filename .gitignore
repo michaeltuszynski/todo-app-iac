@@ -22,3 +22,4 @@ crash.*.log
 terraform.rc
 
 .DS_Store
+.zip
