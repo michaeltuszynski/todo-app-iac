@@ -384,3 +384,319 @@ resource "aws_iam_role_policy_attachment" "codepipeline_policy_attach" {
   role       = aws_iam_role.codepipeline_role.name
   policy_arn = aws_iam_policy.codepipeline_policy.arn
 }
+# CodeBuild to build the Fronend app
+resource "aws_codebuild_project" "frontend" {
+  name          = "frontend-build-project"
+  description   = "Builds the Frontend Website"
+  build_timeout = "15"
+  service_role  = aws_iam_role.codebuild_role.arn
+
+  source {
+    type      = "CODEPIPELINE"
+    buildspec = "buildspec.yml"
+  }
+
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+
+  environment {
+    compute_type = "BUILD_GENERAL1_SMALL"
+    type         = "LINUX_CONTAINER"
+    image        = "aws/codebuild/standard:5.0"
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name  = aws_cloudwatch_log_group.codepipeline_log_group.name
+      stream_name = "frontend-build"
+    }
+  }
+}
+
+# CodeBuild to build the backend app
+resource "aws_codebuild_project" "backend" {
+  name          = "my-backend-build-project"
+  description   = "Builds the NodeJS/Express app"
+  build_timeout = "15"
+  service_role  = aws_iam_role.codebuild_role.arn
+
+  source {
+    type = "CODEPIPELINE"
+    buildspec = yamlencode({
+      version = "0.2"
+      phases = {
+        pre_build = {
+          commands = [
+            "echo Logging in to Amazon ECR...",
+            "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${aws_ecr_repository.backend.repository_url}"
+          ]
+        }
+        install = {
+          runtime-versions = {
+            nodejs = "14"
+          }
+          commands = [
+            "n 18",
+            "yarn install"
+          ]
+        }
+        build = {
+          commands = [
+            "yarn build",
+            "echo Building the Docker image...",
+            "docker build -t ${aws_ecr_repository.backend.repository_url}:latest .",
+            "docker push ${aws_ecr_repository.backend.repository_url}:latest",
+            "printf '[{\"name\":\"backend\",\"imageUri\":\"${aws_ecr_repository.backend.repository_url}:latest\"}]' > imagedefinitions.json",
+            "cat imagedefinitions.json"
+          ]
+        }
+      }
+      artifacts = {
+        files = [
+          "**/*"
+        ]
+      }
+    })
+  }
+
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+
+  environment {
+    compute_type                = "BUILD_GENERAL1_SMALL"
+    type                        = "LINUX_CONTAINER"
+    image                       = "aws/codebuild/standard:5.0"
+    image_pull_credentials_type = "CODEBUILD"
+    privileged_mode             = true
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name  = aws_cloudwatch_log_group.codepipeline_log_group.name
+      stream_name = "backend-build"
+    }
+  }
+}
+# S3 Buckets for CodePipeline
+
+locals {
+  github_owner = "michaeltuszynski"
+  github_frontend_repo = "todo-app-frontend"
+}
+
+resource "aws_s3_bucket" "frontend_pipeline" {
+  bucket        = "frontend-pipeline-${random_pet.bucket_name.id}"
+  force_destroy = true
+}
+
+resource "aws_cloudwatch_log_group" "codepipeline_log_group" {
+  name = "codepipeline-log-group"
+}
+
+resource "aws_cloudwatch_event_rule" "codepipeline_events" {
+  name        = "capture-codepipeline-events"
+  description = "Capture all CodePipeline events"
+
+  event_pattern = jsonencode({
+    "source" : ["aws.codepipeline"]
+  })
+}
+
+resource "aws_cloudwatch_event_target" "send_to_cloudwatch_logs" {
+  rule      = aws_cloudwatch_event_rule.codepipeline_events.name
+  arn       = aws_cloudwatch_log_group.codepipeline_log_group.arn
+  target_id = "CodePipelineToCloudWatch"
+}
+
+# CodePipeline for frontend app
+resource "aws_codepipeline" "frontend" {
+  name     = "my-frontend-pipeline"
+  role_arn = aws_iam_role.codepipeline_role.arn
+
+  artifact_store {
+    location = aws_s3_bucket.frontend_pipeline.bucket
+    type     = "S3"
+  }
+
+  stage {
+    name = "Source"
+    action {
+      name             = "Source"
+      category         = "Source"
+      owner            = "AWS"
+      provider         = "CodeStarSourceConnection"
+      version          = "1"
+      output_artifacts = ["source_output"]
+      configuration = {
+        ConnectionArn        = aws_codestarconnections_connection.github_connection.arn
+        FullRepositoryId     = "${local.github_owner}/${local.github_frontend_repo}"
+        BranchName           = "main"
+        OutputArtifactFormat = "CODEBUILD_CLONE_REF"
+      }
+    }
+  }
+
+  stage {
+    name = "Build"
+    action {
+      name             = "Build"
+      category         = "Build"
+      owner            = "AWS"
+      provider         = "CodeBuild"
+      input_artifacts  = ["source_output"]
+      output_artifacts = ["build_output"]
+      version          = "1"
+      configuration = {
+        ProjectName = aws_codebuild_project.frontend.name
+      }
+    }
+  }
+
+  stage {
+    name = "Cleanup"
+    action {
+      name             = "EmptyS3Bucket"
+      category         = "Invoke"
+      owner            = "AWS"
+      provider         = "Lambda"
+      version          = "1"
+      input_artifacts  = []
+      output_artifacts = []
+      configuration = {
+        FunctionName = aws_lambda_function.empty_s3.function_name
+        UserParameters = jsonencode({
+          bucket_name = aws_s3_bucket.frontend.bucket
+        })
+      }
+    }
+  }
+
+  stage {
+    name = "Deploy"
+    action {
+      name            = "Deploy"
+      category        = "Deploy"
+      owner           = "AWS"
+      provider        = "S3"
+      input_artifacts = ["build_output"]
+      version         = "1"
+      configuration = {
+        BucketName = aws_s3_bucket.frontend.bucket
+        Extract    = "true"
+      }
+    }
+  }
+
+  stage {
+    name = "PushBackendConfig"
+    action {
+      name             = "WriteConfig"
+      category         = "Invoke"
+      owner            = "AWS"
+      provider         = "Lambda"
+      version          = "1"
+      input_artifacts  = []
+      output_artifacts = []
+      configuration = {
+        FunctionName = aws_lambda_function.write_config.function_name
+        UserParameters = jsonencode({
+          bucket_name = aws_s3_bucket.frontend.bucket
+          environment_variables = {
+            REACT_APP_BACKEND_URL = local.backend_url
+          }
+        })
+      }
+    }
+  }
+
+  stage {
+    name = "InvalidateCloudFront"
+    action {
+      name             = "InvalidateCloudFront"
+      category         = "Invoke"
+      owner            = "AWS"
+      provider         = "Lambda"
+      version          = "1"
+      input_artifacts  = []
+      output_artifacts = []
+      configuration = {
+        FunctionName = aws_lambda_function.invalidate_cf.function_name
+        UserParameters = jsonencode({
+          distribution_id = aws_cloudfront_distribution.s3_distribution.id
+        })
+      }
+    }
+  }
+}
+locals {
+  github_backend_repo = "todo-app-backend"
+}
+
+resource "aws_s3_bucket" "backend_pipeline" {
+  bucket        = "backend-pipeline-${random_pet.bucket_name.id}"
+  force_destroy = true
+}
+
+# CodePipeline for backend app
+resource "aws_codepipeline" "backend" {
+  name     = "my-backend-pipeline"
+  role_arn = aws_iam_role.codepipeline_role.arn
+
+  artifact_store {
+    location = aws_s3_bucket.backend_pipeline.bucket
+    type     = "S3"
+  }
+
+  stage {
+    name = "Source"
+    action {
+      name             = "Source"
+      category         = "Source"
+      owner            = "AWS"
+      provider         = "CodeStarSourceConnection"
+      version          = "1"
+      output_artifacts = ["source_output"]
+      configuration = {
+        ConnectionArn        = aws_codestarconnections_connection.github_connection.arn
+        FullRepositoryId     = "${local.github_owner}/${local.github_backend_repo}"
+        BranchName           = "main"
+        OutputArtifactFormat = "CODEBUILD_CLONE_REF"
+      }
+    }
+  }
+
+  stage {
+    name = "Build"
+    action {
+      name             = "Build"
+      category         = "Build"
+      owner            = "AWS"
+      provider         = "CodeBuild"
+      input_artifacts  = ["source_output"]
+      output_artifacts = ["build_output"]
+      version          = "1"
+      configuration = {
+        ProjectName = aws_codebuild_project.backend.name
+      }
+    }
+  }
+
+  stage {
+    name = "Deploy"
+    action {
+      name            = "Deploy"
+      category        = "Deploy"
+      owner           = "AWS"
+      provider        = "ECS"
+      input_artifacts = ["build_output"]
+      version         = "1"
+      configuration = {
+        ClusterName = aws_ecs_cluster.todo_api_cluster.name
+        ServiceName = aws_ecs_service.backend.name
+        FileName    = "imagedefinitions.json"
+      }
+    }
+  }
+}

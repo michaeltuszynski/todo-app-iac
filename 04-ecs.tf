@@ -1,6 +1,50 @@
 
 
+resource "aws_ecr_repository" "backend" {
+  name                 = "backend_app"
+  image_tag_mutability = "MUTABLE"
 
+  # Enable image scanning on push
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  force_delete = true
+}
+
+resource "aws_ecr_lifecycle_policy" "cleanup_policy" {
+  repository = aws_ecr_repository.backend.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Expire untagged images"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "imageCountMoreThan"
+          countNumber = 10
+        }
+        action = {
+          type = "expire"
+        }
+      },
+      {
+        rulePriority = 2
+        description  = "Expire images older than 30 days"
+        selection = {
+          tagStatus   = "any"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 5
+        }
+        action = {
+          type = "expire"
+        }
+      }
+    ]
+  })
+}
 
 # Define the ECS Cluster - the top level of the ECS hierarchy.   Clusters contain services.
 resource "aws_ecs_cluster" "todo_api_cluster" {
