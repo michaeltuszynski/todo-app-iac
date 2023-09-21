@@ -12,20 +12,15 @@ terraform {
 }
 
 provider "aws" {
-  region                   = var.region
+  region = "us-east-1"
   shared_credentials_files = ["~/.aws/credentials"]
 
   default_tags {
     tags = {
-      Name        = "${var.app_name}-app"
-      Environment = var.app_environment
+      Name        = "my-app"
+      Environment = "development"
     }
   }
-}
-
-provider "aws" {
-  alias  = "east"
-  region = "us-east-1"
 }
 
 provider "random" {}

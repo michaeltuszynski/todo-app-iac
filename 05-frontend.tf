@@ -6,11 +6,11 @@ resource "random_pet" "bucket_name" {
 }
 
 locals {
-  domain_name = "www.${var.custom_domain_name}"
+  www_subdomain = "www.${local.domain_name}"
 }
 
 resource "aws_s3_bucket" "frontend" {
-  bucket        = "${var.app_name}-bucket-${random_pet.bucket_name.id}"
+  bucket        = "my-bucket-${random_pet.bucket_name.id}"
   force_destroy = true
 }
 
@@ -20,7 +20,7 @@ resource "aws_s3_bucket_cors_configuration" "this" {
   cors_rule {
     allowed_headers = ["*"]
     allowed_methods = ["PUT", "POST", "DELETE", "GET", "HEAD"]
-    allowed_origins = ["https://www.mptdemo.com","https://backend.mptdemo.com"]
+    allowed_origins = ["https://${local.www_subdomain}", "https://backend.${local.domain_name}"]
     expose_headers  = ["ETag"]
     max_age_seconds = 3600
   }
@@ -49,7 +49,7 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
 
   enabled             = true
   is_ipv6_enabled     = true
-  comment             = "${var.app_name} Cloudfront Distribution"
+  comment             = "my Cloudfront Distribution"
   default_root_object = "index.html"
 
   default_cache_behavior {
@@ -79,18 +79,30 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
     }
   }
 
-  aliases = [local.domain_name]
+  aliases = [local.www_subdomain]
 
   viewer_certificate {
-    acm_certificate_arn      = data.aws_acm_certificate.cf_distro.arn
+    acm_certificate_arn      = aws_acm_certificate.cert.arn
     ssl_support_method       = "sni-only"
     minimum_protocol_version = "TLSv1.2_2019"
   }
 }
 
 resource "aws_route53_record" "cloudfront_alias_record" {
-  zone_id = var.hosted_zone_id
+  zone_id = local.hosted_zone_id
   name    = "${local.domain_name}."
+  type    = "A"
+
+  alias {
+    name                   = aws_cloudfront_distribution.s3_distribution.domain_name
+    zone_id                = aws_cloudfront_distribution.s3_distribution.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+resource "aws_route53_record" "www_cloudfront_alias_record" {
+  zone_id = local.hosted_zone_id
+  name    = "${local.www_subdomain}."
   type    = "A"
 
   alias {
@@ -124,14 +136,14 @@ resource "aws_s3_bucket_policy" "website" {
 }
 
 # Needed for Cloudfront certificates, only supported in us-east-1
-provider "aws" {
-  alias  = "east"
-  region = "us-east-1"
-}
+# provider "aws" {
+#   alias  = "east"
+#   region = "us-east-1"
+# }
 
-data "aws_acm_certificate" "cf_distro" {
-  domain      = local.domain_name
-  most_recent = true
+# data "aws_acm_certificate" "cf_distro" {
+#   domain      = local.domain_name
+#   most_recent = true
 
-  provider = aws.east
-}
+#   provider = aws.east
+# }
