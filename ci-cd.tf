@@ -532,7 +532,7 @@ resource "aws_codepipeline" "frontend" {
       configuration = {
         ConnectionArn        = aws_codestarconnections_connection.github_connection.arn
         FullRepositoryId     = "${local.github_owner}/${local.github_frontend_repo}"
-        BranchName           = "main"
+        BranchName           = "aws"
         OutputArtifactFormat = "CODEBUILD_CLONE_REF"
       }
     }
@@ -661,7 +661,7 @@ resource "aws_codepipeline" "backend" {
       configuration = {
         ConnectionArn        = aws_codestarconnections_connection.github_connection.arn
         FullRepositoryId     = "${local.github_owner}/${local.github_backend_repo}"
-        BranchName           = "main"
+        BranchName           = "aws"
         OutputArtifactFormat = "CODEBUILD_CLONE_REF"
       }
     }

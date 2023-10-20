@@ -63,7 +63,7 @@ resource "aws_route_table_association" "public" {
 
 # NAT Gateways requires an Elastic IP address (EIP)
 resource "aws_eip" "nat" {
-  vpc        = true
+  domain        = "vpc"
   depends_on = [aws_internet_gateway.gateway]
 }
 
